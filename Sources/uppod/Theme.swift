@@ -31,16 +31,23 @@ enum Theme {
     }
 }
 
-/// Loads a bundled PNG by name, trying the packaged `.app` bundle first, then the SwiftPM module
-/// bundle (dev / `swift run`). Centralizes the dual-lookup that the UI used to repeat per call site.
+/// Loads a bundled PNG by name. Release `.app` builds use `Bundle.main`; debug SwiftPM runs can
+/// fall back to `Bundle.module`.
 enum AppImage {
     static func png(_ name: String) -> NSImage? {
-        for bundle in [Bundle.main, Bundle.module] {
-            if let url = bundle.url(forResource: name, withExtension: "png"),
-               let image = NSImage(contentsOf: url) {
-                return image
-            }
+        if let image = png(name, in: Bundle.main) {
+            return image
         }
+        #if DEBUG
+        if let image = png(name, in: Bundle.module) {
+            return image
+        }
+        #endif
         return nil
+    }
+
+    private static func png(_ name: String, in bundle: Bundle) -> NSImage? {
+        guard let url = bundle.url(forResource: name, withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
     }
 }
