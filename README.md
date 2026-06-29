@@ -90,7 +90,7 @@ UPPOD_NOTARY_PROFILE=uppod-ecma \
 The repository includes two GitHub Actions workflows:
 
 - `.github/workflows/ci.yml`: runs `swift test` on pushes to `main`, pull requests, and manual dispatch.
-- `.github/workflows/release.yml`: builds, signs, notarizes, packages, and publishes a GitHub Release.
+- `.github/workflows/release.yml`: builds, signs, notarizes, packages, publishes a GitHub Release, and updates the Sparkle appcast.
 
 Automatic releases are triggered by pushing a version tag:
 
@@ -109,6 +109,7 @@ Release signing and notarization require these repository secrets:
 - `APPLE_ID`: Apple ID email used for notarization.
 - `APPLE_APP_PASSWORD`: app-specific password for notarization.
 - `APPLE_TEAM_ID`: Apple Developer Team ID.
+- `SPARKLE_PRIVATE_KEY`: Sparkle EdDSA private key used to sign appcast updates.
 
 To encode the certificate on macOS:
 
@@ -116,7 +117,17 @@ To encode the certificate on macOS:
 base64 -i DeveloperIDApplication.p12 | pbcopy
 ```
 
-The release uploads both `uppod.dmg` and `uppod.zip`, and writes SHA-256 checksums into the GitHub Release notes.
+The release uploads both `uppod.dmg` and `uppod.zip`, writes SHA-256 checksums into the GitHub Release notes, and deploys `appcast.xml` to GitHub Pages.
+
+## Updates
+
+UpPod uses Sparkle 2 for app updates.
+
+- Feed URL: `https://serkansepil.github.io/UpPod/appcast.xml`
+- Public EdDSA key: stored in `Info.plist` as `SUPublicEDKey`.
+- Private EdDSA key: stored only as the `SPARKLE_PRIVATE_KEY` GitHub Actions secret.
+
+The first Sparkle-enabled build must still be installed manually. Later releases can be discovered through Sparkle's automatic checks or the popover's update button.
 
 ## Debug Builds
 
