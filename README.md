@@ -1,12 +1,30 @@
 # UpPod
 
-UpPod is a macOS menu bar app that uses compatible AirPods motion data to track head tilt, estimate neck posture strain, and guide short neck exercises. Data is stored locally on the Mac.
+UpPod is a macOS menu bar app that uses compatible AirPods headphone motion data to track head tilt, estimate neck posture strain, and guide short neck exercise sessions. Calibration, posture summaries, and exercise summaries are stored locally on the Mac.
 
 ## Requirements
 
 - macOS 14 or newer
+- Xcode Command Line Tools with Swift 5.9 or newer
 - Compatible AirPods with headphone motion support
 - Motion & Fitness permission
+- Homebrew and `create-dmg` only when packaging a DMG
+
+## Quick Start
+
+Run the tests:
+
+```bash
+swift test
+```
+
+Run the app from SwiftPM with mock motion data:
+
+```bash
+UPPOD_MOCK=1 swift run
+```
+
+Mock mode is useful for local development without AirPods. Internal debug flags are only honored in SwiftPM debug builds.
 
 ## Build
 
@@ -15,9 +33,9 @@ UpPod is a macOS menu bar app that uses compatible AirPods motion data to track 
 open UpPod.app
 ```
 
-`build.sh` creates `UpPod.app`, copies bundled resources, and signs the app.
+`build.sh` creates `UpPod.app`, copies bundled resources, and signs the app. By default it uses ad-hoc signing for local builds.
 
-By default it uses ad-hoc signing for local builds. For Developer ID signing:
+For Developer ID signing:
 
 ```bash
 UPPOD_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh
@@ -52,8 +70,11 @@ Create a DMG after building:
 
 ```bash
 brew install create-dmg
+./build.sh
 ./package-dmg.sh
 ```
+
+`package-dmg.sh` uses `Resources/dmg-background.png`, creates `uppod.dmg`, verifies it with `hdiutil`, and prints a SHA-256 checksum.
 
 For a signed and notarized DMG:
 
@@ -64,17 +85,75 @@ UPPOD_NOTARY_PROFILE=uppod-ecma \
 ./package-dmg.sh
 ```
 
+## GitHub CI/CD
+
+The repository includes two GitHub Actions workflows:
+
+- `.github/workflows/ci.yml`: runs `swift test` on pushes to `main`, pull requests, and manual dispatch.
+- `.github/workflows/release.yml`: builds, signs, notarizes, packages, and publishes a GitHub Release.
+
+Automatic releases are triggered by pushing a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow can also be started manually from GitHub Actions with a version such as `v0.1.0`.
+
+Release signing and notarization require these repository secrets:
+
+- `APPLE_CERTIFICATE_BASE64`: base64-encoded `.p12` Developer ID Application certificate.
+- `APPLE_CERTIFICATE_PASSWORD`: password for the `.p12` file.
+- `APPLE_SIGNING_IDENTITY`: codesign identity, for example `Developer ID Application: Your Name (TEAMID)`.
+- `APPLE_ID`: Apple ID email used for notarization.
+- `APPLE_APP_PASSWORD`: app-specific password for notarization.
+- `APPLE_TEAM_ID`: Apple Developer Team ID.
+
+To encode the certificate on macOS:
+
+```bash
+base64 -i DeveloperIDApplication.p12 | pbcopy
+```
+
+The release uploads both `uppod.dmg` and `uppod.zip`, and writes SHA-256 checksums into the GitHub Release notes.
+
 ## Debug Builds
 
-Internal flags are honored only in SwiftPM debug builds.
+Common debug commands:
 
 ```bash
 UPPOD_MOCK=1 swift run
 UPPOD_MOCK=1 UPPOD_DEBUG=1 swift run
 UPPOD_MOCK=1 UPPOD_MOCK_EXERCISE=1 swift run
+UPPOD_MOCK=1 UPPOD_EX_AUTOSTART=1 UPPOD_EX_AUTOPRESENT=1 swift run
 ```
 
 Release builds ignore these flags.
+
+Useful flags:
+
+- `UPPOD_MOCK=1`: use generated motion samples instead of AirPods.
+- `UPPOD_DEBUG=1`: print posture pipeline logs.
+- `UPPOD_MOCK_EXERCISE=1`: widen mock motion for exercise-session testing.
+- `UPPOD_EX_AUTOSTART=1`: start the short test exercise plan automatically.
+- `UPPOD_EX_AUTOPRESENT=1`: open the exercise window after autostart.
+- `UPPOD_AUTOCAL=1`: auto-calibrate after the first stable mock samples.
+- `UPPOD_PERSIST=1`: persist state even when `UPPOD_MOCK=1`.
+- `UPPOD_STORE_PATH=/tmp/uppod-state.json`: override the JSON store path in debug builds.
+
+## Tests
+
+```bash
+swift test
+```
+
+The test suite covers:
+
+- Posture pipeline smoothing, flexion estimation, motion gating, classification, and dwell behavior.
+- Neck load and strain curve calculations.
+- Daily scoring and calibration helpers.
+- JSON persistence, tolerant decoding, migration stamping, and corrupt-file backup.
 
 ## Data
 
@@ -86,26 +165,33 @@ UpPod stores calibration, sensitivity, daily posture summaries, and exercise ses
 
 No posture data is sent to a server by this app.
 
+See `PRIVACY.md` for the privacy summary.
+
 ## Current Production Status
 
 Ready for local signed builds and manual QA. Before public distribution:
 
 - Sign with a Developer ID certificate.
 - Notarize and staple the app.
-- Complete the manual release checklist in `RELEASE_CHECKLIST.md`.
-- Add automated tests in the final hardening pass.
+- Run manual QA with real AirPods on supported macOS versions.
 
 ## Architecture
 
 ```text
+main.swift               NSApplication bootstrap
+RuntimeFlags.swift       debug-only environment flags
+Theme.swift              shared colors and bundled image lookup
+L10n.swift               lightweight Turkish/English text helpers
 Motion.swift             AirPods or mock motion source
 Pipeline.swift           gravity-fused flexion, smoothing, gate, classifier
 Strain.swift             neck load and strain estimate
 Scoring.swift            daily dose and posture score
 Persistence.swift        local JSON persistence
-PostureEngine.swift      app state orchestration
+PostureEngine.swift      posture state orchestration
 StatusBar.swift          NSStatusItem and popover host
 PopoverContentView.swift menu bar popover UI
+Exercise.swift           exercise definitions and default plans
 ExerciseEngine.swift     exercise session logic
 ExerciseSessionView.swift exercise UI
+ExerciseWindow.swift     persistent exercise window controller
 ```

@@ -1,0 +1,199 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example v0.1.0"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark this GitHub Release as a pre-release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, notarize, and publish
+    runs-on: macos-14
+
+    env:
+      APP_NAME: UpPod.app
+      APP_ZIP: uppod.zip
+      DMG_NAME: uppod.dmg
+      NOTARY_PROFILE: uppod-ci-notary
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+(\.[0-9]+){1,2}([-+][0-9A-Za-z._-]+)?$ ]]; then
+            echo "Version must look like v0.1.0, got: $VERSION" >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$INPUT_PRERELEASE" == "true" ]]; then
+            echo "PRERELEASE_ARG=--prerelease" >> "$GITHUB_ENV"
+          else
+            echo "PRERELEASE_ARG=" >> "$GITHUB_ENV"
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Resolved release version: $VERSION"
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Run tests
+        run: swift test
+
+      - name: Install DMG tooling
+        run: brew install create-dmg
+
+      - name: Validate release secrets
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE_BASE64:?Missing APPLE_CERTIFICATE_BASE64 repository secret}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?Missing APPLE_CERTIFICATE_PASSWORD repository secret}"
+          : "${APPLE_SIGNING_IDENTITY:?Missing APPLE_SIGNING_IDENTITY repository secret}"
+          : "${APPLE_ID:?Missing APPLE_ID repository secret}"
+          : "${APPLE_APP_PASSWORD:?Missing APPLE_APP_PASSWORD repository secret}"
+          : "${APPLE_TEAM_ID:?Missing APPLE_TEAM_ID repository secret}"
+
+      - name: Configure signing and notarization
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+
+          if ! printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH" 2>/dev/null; then
+            printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+          fi
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD"
+
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Build and notarize app
+        env:
+          UPPOD_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          UPPOD_NOTARIZE: "1"
+          UPPOD_NOTARY_PROFILE: ${{ env.NOTARY_PROFILE }}
+        run: ./build.sh
+
+      - name: Verify app signature and staple
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 "$APP_NAME"
+          xcrun stapler validate "$APP_NAME"
+
+      - name: Build signed notarized DMG
+        env:
+          UPPOD_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          UPPOD_NOTARIZE: "1"
+          UPPOD_NOTARY_PROFILE: ${{ env.NOTARY_PROFILE }}
+        run: ./package-dmg.sh
+
+      - name: Prepare release notes
+        run: |
+          set -euo pipefail
+          APP_SHA="$(shasum -a 256 "$APP_ZIP" | awk '{print $1}')"
+          DMG_SHA="$(shasum -a 256 "$DMG_NAME" | awk '{print $1}')"
+          {
+            echo "UpPod $VERSION"
+            echo
+            echo "Artifacts:"
+            echo "- $DMG_NAME"
+            echo "- $APP_ZIP"
+            echo
+            echo "SHA-256:"
+            echo "- $DMG_NAME: $DMG_SHA"
+            echo "- $APP_ZIP: $APP_SHA"
+          } > release-notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" "$DMG_NAME" "$APP_ZIP" --clobber
+            gh release edit "$VERSION" \
+              --title "UpPod $VERSION" \
+              --notes-file release-notes.md
+          else
+            gh release create "$VERSION" \
+              "$DMG_NAME" \
+              "$APP_ZIP" \
+              --title "UpPod $VERSION" \
+              --notes-file release-notes.md \
+              --target "$GITHUB_SHA" \
+              $PRERELEASE_ARG
+          fi
+
+      - name: Clean up signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" >/dev/null 2>&1 || true
