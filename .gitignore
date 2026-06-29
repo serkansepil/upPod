@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# SwiftPM build çıktıları
+.build/
+.swiftpm/
+Package.resolved
+
+# Paketlenmiş uygulama (build artefaktı)
+*.app/
+
+# Dağıtım çıktıları (build.sh / package-dmg.sh artefaktları)
+*.dmg
+*.zip
+.dmg-staging/
+
+# Loglar (spike/uygulama debug çıktıları)
+*.log
+
+# Xcode (ileride kullanılırsa)
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Plan dosyası (yerelde kalır)
+PROJECT_PLAN.md
